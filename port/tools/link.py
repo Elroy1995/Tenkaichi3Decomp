@@ -10,6 +10,20 @@ from toolchain import ROOT, VARIANT, WIN, IOS, PREFIX, CLANG_TARGET, OBJ, DATA, 
 
 B = ROOT / "port/build"
 
+def find_mvk_flags():
+    """Finds the MoltenVK framework or static library wherever it was unpacked under ROOT/mvk."""
+    mvk_root = ROOT / "mvk"
+    # Look for MoltenVK.framework
+    for fw in mvk_root.rglob("MoltenVK.framework"):
+        # Select iOS slice if inside an xcframework
+        if "ios" in str(fw).lower() or not any("macos" in part.lower() for part in fw.parts):
+            return ["-F" + str(fw.parent), "-framework", "MoltenVK"]
+    # Look for libMoltenVK.a
+    for lib in mvk_root.rglob("libMoltenVK.a"):
+        if "ios" in str(lib).lower() or not any("macos" in part.lower() for part in lib.parts):
+            return [str(lib)]
+    return []
+
 def link(objs, extra):
     if WIN:
         common = ["-Wl,--defsym=D_3BE71C=0x3BE71C", "-Wl,--wrap=Progress_Main", f"-Wl,-Map={EXE}.map"]
@@ -25,17 +39,17 @@ def link(objs, extra):
     if IOS:
         sdk_path = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], text=True).strip()
         sdl_dir = ROOT / "ios-deps/sdl3"
-        mvk_dir = ROOT / "mvk/MoltenVK/MoltenVK/static"
+        mvk_flags = find_mvk_flags()
 
         cmd = [
             "clang++",
             "-target", "arm64-apple-ios15.0",
             "-isysroot", sdk_path,
-            "-fPIE", "-pie",
+            "-Wl,-pie",
             "-o", str(EXE)
         ] + extra + objs + [
-            f"-L{sdl_dir / 'lib'}", "-lSDL3",
-            f"-F{mvk_dir}", "-framework", "MoltenVK",
+            f"-L{sdl_dir / 'lib'}", "-lSDL3"
+        ] + mvk_flags + [
             "-framework", "Metal",
             "-framework", "Foundation",
             "-framework", "UIKit",
@@ -59,11 +73,9 @@ def link(objs, extra):
 def main():
     objs = [str(o) for o in sorted(OBJ.glob("*.o")) + sorted(DATA.glob("*.o"))]
     r = link(objs, [])
-    
-    # Extract undefined symbols for both GNU ld and Apple ld64
+
+    # Collect undefined symbols reported by ld64
     need = set(re.findall(r"undefined reference to `(\w+)'", r.stderr))
-    need |= set(re.findall(r'Undefined symbols for architecture arm64:\s*\n(?:\s*"_(\w+)",? referenced from:.*\n)+', r.stderr))
-    # Direct match for single lines: "_symbolName", referenced from:
     for m in re.finditer(r'"_(\w+)", referenced from:', r.stderr):
         need.add(m.group(1))
 
