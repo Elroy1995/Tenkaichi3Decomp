@@ -13,12 +13,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Toolchain info
+      - name: Toolchain info & brew packages
         run: |
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
           brew install ninja cmake glslang llvm
-          "$(brew --prefix llvm)/bin/clang" --version
+          LLVM_DIR="$(brew --prefix llvm)/bin"
+          echo "$LLVM_DIR" >> $GITHUB_PATH
+          echo "Toolchain binaries:"
+          "$LLVM_DIR/clang" --version
+          which ld64.lld || echo "ld64.lld not found in PATH"
 
       - name: SDL3 for iOS (static, arm64)
         run: |
@@ -71,6 +75,7 @@ jobs:
           name: Tenkaichi3-iOS-Binary
           path: |
             port/build/bt3_ios
+            port/build/bt3_ios.mem
             port/build/undefined.txt
             port/build/stubs.txt
             port/build/gen/stubs.c
