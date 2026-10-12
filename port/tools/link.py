@@ -2,7 +2,7 @@
 """Links the PC / iOS build: every object from undefined.py, plus generated stubs for whatever is still missing.
 A stub prints its name and stops the program, so running the result shows what the game needs next.
 Usage: port/tools/undefined.py && port/tools/link.py     -> port/build/bt3"""
-import os, pathlib, re, subprocess, sys
+import os, pathlib, re, shutil, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "port/tools"))
@@ -20,6 +20,20 @@ def find_mvk_flags():
             return [str(lib)]
     return []
 
+def get_brew_llvm_bin():
+    """Finds Homebrew's LLVM bin directory."""
+    try:
+        prefix = subprocess.check_output(["brew", "--prefix", "llvm"], text=True).strip()
+        p = pathlib.Path(prefix) / "bin"
+        if p.exists():
+            return p
+    except Exception:
+        pass
+    for p in [pathlib.Path("/opt/homebrew/opt/llvm/bin"), pathlib.Path("/usr/local/opt/llvm/bin")]:
+        if p.exists():
+            return p
+    return None
+
 def link(objs, extra):
     if WIN:
         common = ["-Wl,--defsym=D_3BE71C=0x3BE71C", "-Wl,--wrap=Progress_Main", f"-Wl,-Map={EXE}.map"]
@@ -36,17 +50,16 @@ def link(objs, extra):
         sdk_path = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], text=True).strip()
         sdl_dir = ROOT / "ios-deps/sdl3"
         mvk_flags = find_mvk_flags()
+        llvm_bin = get_brew_llvm_bin()
 
-        # Check for Homebrew LLVM lld
-        brew_llvm = pathlib.Path("/opt/homebrew/opt/llvm/bin")
-        if not brew_llvm.exists():
-            brew_llvm = pathlib.Path("/usr/local/opt/llvm/bin")
+        # Call Homebrew's clang++ directly so -fuse-ld=lld resolves ld64.lld
+        compiler = str(llvm_bin / "clang++") if (llvm_bin and (llvm_bin / "clang++").exists()) else "clang++"
 
         cmd = [
-            str(brew_llvm / "clang++") if (brew_llvm / "clang++").exists() else "clang++",
-            "-target", "arm64-apple-ios15.0",
+            compiler,
+            "--target=arm64-apple-ios15.0",
             "-isysroot", sdk_path,
-            "-fuse-ld=lld",
+            f"--ld-path={llvm_bin / 'ld64.lld'}" if (llvm_bin and (llvm_bin / 'ld64.lld').exists()) else "-fuse-ld=lld",
             "-Wl,-pagezero_size,0x10000",
             "-Wl,-image_base,0x20000000",
             "-o", str(EXE)
@@ -90,7 +103,7 @@ def main():
     need = set(re.findall(r"undefined reference to `(\w+)'", r.stderr))
     for m in re.finditer(r'"_(\w+)", referenced from:', r.stderr):
         need.add(m.group(1))
-    for m in re.finditer(r"undefined symbol: _?(\w+)", r.stderr):
+    for m in re.finditer(r"undefined symbol:\s*(?:_)?(\w+)", r.stderr):
         need.add(m.group(1))
 
     clean_need = sorted(need)
@@ -106,7 +119,9 @@ def main():
     stubs_obj = str(B / "gen/stubs.o")
     if IOS:
         sdk_path = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], text=True).strip()
-        subprocess.run(["clang", "-target", "arm64-apple-ios15.0", "-isysroot", sdk_path, "-c", str(B / "gen/stubs.c"), "-o", stubs_obj], check=True)
+        llvm_bin = get_brew_llvm_bin()
+        cc = str(llvm_bin / "clang") if (llvm_bin and (llvm_bin / "clang").exists()) else "clang"
+        subprocess.run([cc, "--target=arm64-apple-ios15.0", "-isysroot", sdk_path, "-c", str(B / "gen/stubs.c"), "-o", stubs_obj], check=True)
         r = link(objs, [stubs_obj])
     else:
         r = link(objs, [str(B / "gen/stubs.c")])
