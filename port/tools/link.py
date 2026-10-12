@@ -20,7 +20,7 @@ def find_mvk_flags():
             return [str(lib)]
     return []
 
-def get_brew_llvm_bin():
+def get_brew_llvm():
     try:
         prefix = subprocess.check_output(["brew", "--prefix", "llvm"], text=True).strip()
         p = pathlib.Path(prefix) / "bin"
@@ -32,6 +32,19 @@ def get_brew_llvm_bin():
         if p.exists():
             return p
     return None
+
+def find_lld_path():
+    llvm_bin = get_brew_llvm()
+    if llvm_bin:
+        for name in ["ld64.lld", "lld", "ld.lld"]:
+            candidate = llvm_bin / name
+            if candidate.exists():
+                return str(candidate)
+    for name in ["ld64.lld", "lld", "ld.lld"]:
+        w = shutil.which(name)
+        if w:
+            return w
+    return "ld"
 
 def link(objs, extra):
     if WIN:
@@ -49,24 +62,22 @@ def link(objs, extra):
         sdk_path = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], text=True).strip()
         sdl_dir = ROOT / "ios-deps/sdl3"
         mvk_flags = find_mvk_flags()
-        llvm_bin = get_brew_llvm_bin()
+        llvm_bin = get_brew_llvm()
+        lld_exec = find_lld_path()
 
-        lld_bin = str(llvm_bin / "ld64.lld") if (llvm_bin and (llvm_bin / "ld64.lld").exists()) else shutil.which("ld64.lld")
+        # Invoke Homebrew's clang++ driver using --ld-path to direct execution to lld
+        compiler = str(llvm_bin / "clang++") if (llvm_bin and (llvm_bin / "clang++").exists()) else "clang++"
 
-        # Invoke ld64.lld directly to bypass Apple ld64's relocation restrictions
         cmd = [
-            lld_bin,
-            "-arch", "arm64",
-            "-platform_version", "ios", "15.0", "15.0",
-            "-syslibroot", sdk_path,
-            "-image_base", "0x20000000",
-            "-pagezero_size", "0x10000",
+            compiler,
+            "--target=arm64-apple-ios15.0",
+            "-isysroot", sdk_path,
+            f"--ld-path={lld_exec}",
+            "-Wl,-pagezero_size,0x10000",
+            "-Wl,-image_base,0x20000000",
             "-o", str(EXE)
         ] + extra + objs + [
-            "-L" + str(sdl_dir / "lib"),
-            "-lSDL3",
-            "-lSystem",
-            "-lc++"
+            f"-L{sdl_dir / 'lib'}", "-lSDL3"
         ] + mvk_flags + [
             "-framework", "Metal",
             "-framework", "Foundation",
@@ -121,7 +132,7 @@ def main():
     stubs_obj = str(B / "gen/stubs.o")
     if IOS:
         sdk_path = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], text=True).strip()
-        llvm_bin = get_brew_llvm_bin()
+        llvm_bin = get_brew_llvm()
         cc = str(llvm_bin / "clang") if (llvm_bin and (llvm_bin / "clang").exists()) else "clang"
         subprocess.run([cc, "--target=arm64-apple-ios15.0", "-isysroot", sdk_path, "-c", str(B / "gen/stubs.c"), "-o", stubs_obj], check=True)
         r = link(objs, [stubs_obj])
