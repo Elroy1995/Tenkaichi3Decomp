@@ -1,5 +1,3 @@
-# Stage 1: prepare the iOS toolchain pieces and test the compilation pipeline against decompiled source.
-# Put this file at .github/workflows/build-ios.yml in your fork, then Actions > build-ios > Run workflow.
 name: build-ios
 
 on:
@@ -10,7 +8,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     env:
-      SDL_VERSION: "3.4.12"          # same version the Dockerfile uses
+      SDL_VERSION: "3.4.12"
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +19,6 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-path
           brew install ninja cmake glslang llvm
           "$(brew --prefix llvm)/bin/clang" --version
-          ls "$(brew --prefix llvm)/bin" | head -50
 
       - name: SDL3 for iOS (static, arm64)
         run: |
@@ -35,76 +32,29 @@ jobs:
             -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST_LIBRARY=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
           cmake --build sdl-build
           cmake --install sdl-build
-          find ios-deps/sdl3 -maxdepth 3 | head -40
 
       - name: MoltenVK for iOS (prebuilt release)
         run: |
-          gh release view --repo KhronosGroup/MoltenVK --json tagName,assets -q '.tagName, (.assets[].name)'
           mkdir -p mvk
           gh release download --repo KhronosGroup/MoltenVK --pattern 'MoltenVK-ios.tar' --dir mvk
           tar -xf mvk/MoltenVK-ios.tar -C mvk
-          find mvk -maxdepth 6 -name '*.xcframework'
 
-      - name: Clang Python bindings (informational)
-        continue-on-error: true
+      - name: Clang Python bindings
         run: |
           python3 -m venv .venv
           . .venv/bin/activate
           pip install libclang
-          pip show libclang | head -3
-          python -c "import clang.cindex as c; print(c.__file__)"
 
-      - name: Show how the repo's build picks its compiler variant
-        run: |
-          ls port port/tools port/setup port/release
-          echo "---- BT3_CC / win64 / clang64 / triple mentions"
-          grep -rn "BT3_CC\|win64\|clang64\|--target\|-triple" port/tools port/setup | head -120
-          echo "---- head of undefined.py"
-          head -80 port/tools/undefined.py
-          echo "---- head of link.py"
-          head -80 port/tools/link.py
-          echo "---- port/setup/build.sh"
-          cat port/setup/build.sh
-
-      - name: Test Single Source File Pipeline on ARM64
-        continue-on-error: true
+      - name: Run Full Game Source Compilation (undefined.py)
         run: |
           . .venv/bin/activate
           LLVM_BIN="$(brew --prefix llvm)/bin"
-          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
           export PATH="$LLVM_BIN:$PATH"
           export PYTHONPATH="$PWD/port/tools:$PYTHONPATH"
+          export BT3_CC=ios64
+          export BT3_SDL3="$PWD/ios-deps/sdl3"
 
-          # Locate the first valid C file from src/
-          TEST_SRC=$(find src -name "*.c" | head -n 1)
-          echo "Testing pipeline on: $TEST_SRC"
+          mkdir -p port/build/obj_ios64
 
-          mkdir -p port/build/test_obj
-
-          # 1. Preprocess with Clang targeting iOS
-          "$LLVM_BIN/clang" --target=arm64-apple-ios15.0 -isysroot "$SDK_PATH" \
-            -std=gnu89 -E "$TEST_SRC" \
-            -Iinclude -Iport/include -include port_compat.h \
-            -o port/build/test_obj/test.i.raw
-
-          # 2. Run eeconst transform
-          python3 -c "import eeconst, pathlib; p=pathlib.Path('port/build/test_obj/test.i.raw'); pathlib.Path('port/build/test_obj/test.i').write_text(eeconst.transform(p.read_text()))"
-
-          # 3. Run ptr32 transform
-          python3 -c "import ptr32, pathlib; t=ptr32.transform('port/build/test_obj/test.i', ['-x', 'cpp-output', '--target=arm64-apple-ios15.0', '-isysroot', '$SDK_PATH', '-std=gnu89', '-fms-extensions', '-w']); pathlib.Path('port/build/test_obj/test.i').write_text(t, encoding='latin-1')"
-          echo "ptr32 transform passed."
-
-          # 4. Emit LLVM IR
-          "$LLVM_BIN/clang" --target=arm64-apple-ios15.0 -isysroot "$SDK_PATH" \
-            -std=gnu89 -fms-extensions -O2 -w -S -emit-llvm -x cpp-output \
-            port/build/test_obj/test.i -o port/build/test_obj/test.ll
-
-          # 5. Run irfix transform
-          python3 -c "import irfix, pathlib; p=pathlib.Path('port/build/test_obj/test.ll'); text, n = irfix.fix(p.read_text()); p.write_text(text); print(f'irfix applied {n} fixes')"
-
-          # 6. LLC to Mach-O ARM64 object file
-          "$LLVM_BIN/llc" -mtriple=arm64-apple-ios15.0 -O2 -filetype=obj -relocation-model=pic \
-            port/build/test_obj/test.ll -o port/build/test_obj/test.o
-
-          echo "Successfully compiled $TEST_SRC to ARM64 iOS object file!"
-          file port/build/test_obj/test.o
+          echo "Compiling game sources with BT3_CC=ios64..."
+          python3 port/tools/undefined.py
