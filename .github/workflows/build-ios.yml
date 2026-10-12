@@ -1,0 +1,67 @@
+# Stage 1: prepare the iOS toolchain pieces and print what we need to see in the repo's build tools.
+# Put this file at .github/workflows/build-ios.yml in your fork, then Actions > build-ios > Run workflow.
+name: build-ios
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      SDL_VERSION: "3.4.12"          # same version the Dockerfile uses
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          brew install ninja cmake glslang llvm
+          "$(brew --prefix llvm)/bin/clang" --version
+          ls "$(brew --prefix llvm)/bin" | head -50
+
+      - name: SDL3 for iOS (static, arm64)
+        run: |
+          curl -fsSL -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VERSION}/SDL3-${SDL_VERSION}.tar.gz"
+          tar -xzf sdl.tar.gz
+          cmake -S "SDL3-${SDL_VERSION}" -B sdl-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$(xcrun -f clang)" \
+            -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DCMAKE_INSTALL_PREFIX="$PWD/ios-deps/sdl3" \
+            -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST_LIBRARY=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+          cmake --build sdl-build
+          cmake --install sdl-build
+          find ios-deps/sdl3 -maxdepth 3 | head -40
+
+      - name: MoltenVK for iOS (prebuilt release)
+        run: |
+          gh release view --repo KhronosGroup/MoltenVK --json tagName,assets -q '.tagName, (.assets[].name)'
+          mkdir -p mvk
+          gh release download --repo KhronosGroup/MoltenVK --pattern 'MoltenVK-ios.tar' --dir mvk
+          tar -xf mvk/MoltenVK-ios.tar -C mvk
+          find mvk -maxdepth 6 -name '*.xcframework'
+
+      - name: Clang Python bindings (informational)
+        continue-on-error: true
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install libclang
+          pip show libclang | head -3
+          python -c "import clang.cindex as c; print(c.__file__)"
+
+      - name: Show how the repo's build picks its compiler variant
+        run: |
+          ls port port/tools port/setup port/release
+          echo "---- BT3_CC / win64 / clang64 / triple mentions"
+          grep -rn "BT3_CC\|win64\|clang64\|--target\|-triple" port/tools port/setup | head -120
+          echo "---- head of undefined.py"
+          head -80 port/tools/undefined.py
+          echo "---- head of link.py"
+          head -80 port/tools/link.py
+          echo "---- port/setup/build.sh"
+          cat port/setup/build.sh
