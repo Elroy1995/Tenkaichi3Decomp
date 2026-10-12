@@ -33,6 +33,19 @@ def get_brew_llvm_bin():
             return path
     return None
 
+def find_lld_path():
+    llvm_bin = get_brew_llvm_bin()
+    if llvm_bin:
+        for name in ["ld64.lld", "lld"]:
+            candidate = llvm_bin / name
+            if candidate.exists():
+                return str(candidate)
+    for name in ["ld64.lld", "lld"]:
+        w = shutil.which(name)
+        if w:
+            return w
+    return None
+
 def link(objs, extra):
     if WIN:
         common = ["-Wl,--defsym=D_3BE71C=0x3BE71C", "-Wl,--wrap=Progress_Main", f"-Wl,-Map={EXE}.map"]
@@ -49,40 +62,47 @@ def link(objs, extra):
         sdk_path = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], text=True).strip()
         sdl_dir = ROOT / "ios-deps/sdl3"
         mvk_flags = find_mvk_flags()
-        llvm_bin = get_brew_llvm_bin()
+        lld_bin = find_lld_path()
 
-        compiler = str(llvm_bin / "clang++") if (llvm_bin and (llvm_bin / "clang++").exists()) else "clang++"
-        lld_path = str(llvm_bin / "ld64.lld") if (llvm_bin and (llvm_bin / "ld64.lld").exists()) else shutil.which("ld64.lld")
+        # If ld64.lld is available, invoke it directly so Apple ld64 never touches the objects
+        if lld_bin:
+            frameworks = [
+                "-framework", "Metal", "-framework", "Foundation", "-framework", "UIKit",
+                "-framework", "QuartzCore", "-framework", "AudioToolbox", "-framework",
+                "CoreGraphics", "-framework", "CoreHaptics", "-framework", "GameController",
+                "-framework", "AVFoundation"
+            ]
+            cmd = [
+                lld_bin,
+                "-arch", "arm64",
+                "-platform_version", "ios", "15.0", "15.0",
+                "-syslibroot", sdk_path,
+                "-pagezero_size", "0x10000",
+                "-image_base", "0x20000000",
+                "-o", str(EXE)
+            ] + extra + objs + [
+                f"-L{sdl_dir / 'lib'}", "-lSDL3",
+                "-lSystem", "-lc++", "-lc++abi"
+            ] + mvk_flags + frameworks
+            return subprocess.run(cmd, capture_output=True, text=True)
 
-        link_args = [
-            compiler,
+        # Fallback to clang++ driver
+        cmd = [
+            "clang++",
             "--target=arm64-apple-ios15.0",
             "-isysroot", sdk_path,
-        ]
-
-        if lld_path and pathlib.Path(lld_path).exists():
-            link_args.append(f"--ld-path={lld_path}")
-
-        # Pass options to accommodate 32-bit address space relocations
-        link_args += [
             "-Wl,-pagezero_size,0x10000",
             "-Wl,-image_base,0x20000000",
-            "-Wl,-read_only_relocs,suppress",
             "-o", str(EXE)
         ] + extra + objs + [
             f"-L{sdl_dir / 'lib'}", "-lSDL3"
         ] + mvk_flags + [
-            "-framework", "Metal",
-            "-framework", "Foundation",
-            "-framework", "UIKit",
-            "-framework", "QuartzCore",
-            "-framework", "AudioToolbox",
-            "-framework", "CoreGraphics",
-            "-framework", "CoreHaptics",
-            "-framework", "GameController",
+            "-framework", "Metal", "-framework", "Foundation", "-framework", "UIKit",
+            "-framework", "QuartzCore", "-framework", "AudioToolbox", "-framework",
+            "CoreGraphics", "-framework", "CoreHaptics", "-framework", "GameController",
             "-framework", "AVFoundation"
         ]
-        return subprocess.run(link_args, capture_output=True, text=True)
+        return subprocess.run(cmd, capture_output=True, text=True)
 
     # Linux
     m = "-m64" if VARIANT == "clang64" else "-m32"
