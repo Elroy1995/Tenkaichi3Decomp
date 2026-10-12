@@ -6,7 +6,6 @@ import portsrc
 import eeconst
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-# The build variants (BT3_CC): see toolchain.py.
 from toolchain import VARIANT, WIN, IOS, BITS64, PREFIX, CLANG_TARGET, OBJ, DATA, sdl3
 
 def variant(cmd):
@@ -48,7 +47,9 @@ def compile_ee(cmd, src, o):
         return r
     i = pathlib.Path(str(o)[:-2] + ".i")
     i.write_text(eeconst.transform(r.stdout))
-    if BITS64 and cmd[0] in ("clang", "clang++") and not o.name.startswith("nl_"):
+    # Only rewrite game files (src/ and include/), never host/port files
+    is_game_file = not o.name.startswith(("nl_", "pc_", "gs_", "cxx_"))
+    if BITS64 and cmd[0] in ("clang", "clang++") and is_game_file:
         import ptr32
         std = next((a for a in cmd if a.startswith("-std=")), "-std=gnu89")
         target_flags = CLANG_TARGET if IOS else (CLANG_TARGET or ["-m64"])
@@ -67,7 +68,7 @@ def compile_ee(cmd, src, o):
                 skip = True
             else:
                 c2.append(a)
-        if BITS64:
+        if BITS64 and is_game_file:
             import irfix
             ll = pathlib.Path(str(o)[:-2] + ".ll")
             r = subprocess.run(c2 + ["-S", "-emit-llvm", "-x", "cpp-output", str(i), "-o", str(ll)], cwd=ROOT, capture_output=True, text=True)
@@ -144,16 +145,18 @@ def main():
     else:
         objs += [str(o) for o in sorted((ROOT / "port/build/obj_data").glob("*.o"))]
 
+    # Math library
     for f in sorted((ROOT / "port/third_party/newlib_libm").glob("*.c")):
         o = OBJ / ("nl_" + f.stem + ".o")
-        r = compile_ee(["gcc", "-m32", "-std=gnu89", "-c", "-O2", "-g", "-fno-pic", "-msoft-float", "-mno-sse", "-mno-mmx",
-                        "-malign-double", "-fno-strict-aliasing", "-ffp-contract=off", "-fno-builtin", "-w",
-                        "-Iport/include", f"-I{f.parent}", "-include", "newlib_shim.h"], f, o)
+        r = run(["gcc", "-m32", "-std=gnu89", "-c", "-O2", "-g", "-fno-pic", "-msoft-float", "-mno-sse", "-mno-mmx",
+                 "-malign-double", "-fno-strict-aliasing", "-ffp-contract=off", "-fno-builtin", "-w",
+                 "-Iport/include", f"-I{f.parent}", "-include", "newlib_shim.h", str(f), "-o", str(o)], cwd=ROOT, capture_output=True, text=True)
         if r.returncode:
-            print("FAILED", f.name, r.stderr.splitlines()[0][:150])
+            print("FAILED", f.name, "\n".join(l for l in r.stderr.splitlines() if "error" in l)[:400] if r.stderr else "build error")
         else:
             objs.append(str(o))
 
+    # Renderer shaders
     gen = ROOT / "port/build/gen/gs"
     gen.mkdir(parents=True, exist_ok=True)
     arrays = []
@@ -215,6 +218,7 @@ def main():
         else:
             objs.append(str(o))
 
+    # Host platform code (port/src)
     for f in [ROOT / "src/port/vu0_a.c", ROOT / "src/port/vu0_b.c"] + sorted((ROOT / "port/src").glob("*.c")):
         o = OBJ / ("pc_" + f.stem + ".o")
         names = ["-include", "vu0_names.h", "-DREF_VU0_EXTERN_ARITH"] if f.parent.name == "port" and f.parent.parent.name == "src" else []
@@ -223,12 +227,9 @@ def main():
                "-ffp-contract=off", "-fno-builtin", "-w", "-Iinclude", "-Iport/include", "-Iport/src"] + soft + names
         if os.environ.get("BT3_PORT_CFLAGS"):
             cmd += os.environ["BT3_PORT_CFLAGS"].split()
-        if soft and not names:
-            r = compile_ee(cmd, f, o)
-        else:
-            r = run(cmd + [str(f), "-o", str(o)], cwd=ROOT, capture_output=True, text=True)
+        r = run(cmd + [str(f), "-o", str(o)], cwd=ROOT, capture_output=True, text=True)
         if r.returncode:
-            print("FAILED", f.name, r.stderr.splitlines()[0][:150])
+            print("FAILED", f.name, "\n".join(l for l in r.stderr.splitlines() if "error" in l)[:300] if r.stderr else r.stderr[:200])
         else:
             objs.append(str(o))
 
