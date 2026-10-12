@@ -7,17 +7,25 @@ import eeconst
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 # The build variants (BT3_CC): see toolchain.py.
-from toolchain import VARIANT, WIN, BITS64, PREFIX, CLANG_TARGET, OBJ, DATA, sdl3
+from toolchain import VARIANT, WIN, IOS, BITS64, PREFIX, CLANG_TARGET, OBJ, DATA, sdl3
 
 def variant(cmd):
     """The command for this build variant: clang for everything built with software float, 64-bit or Windows flags."""
-    if BITS64:
+    if BITS64 and not IOS:
         cmd = ["-m64" if a == "-m32" else a for a in cmd if a != "-malign-double"]
     if WIN:
         cmd = [a for a in cmd if a != "-m64"]
         inc = [f"-I{sdl3() / 'include'}"] if sdl3() else []
         if cmd[0] in ("gcc", "g++") and "-msoft-float" not in cmd:  # the renderer, the settings window: the Windows gcc
             return [PREFIX + cmd[0]] + cmd[1:] + inc
+    if IOS:
+        # Strip x86 and legacy GCC flags that Apple Clang rejects
+        strip_flags = {"-m32", "-m64", "-msoft-float", "-mno-sse", "-mno-mmx", "-malign-double", "-msse2", "-mfpmath=sse"}
+        cmd = [a for a in cmd if a not in strip_flags]
+        inc = [f"-I{sdl3() / 'include'}"] if sdl3() else []
+        c0 = cmd[0]
+        compiler = "clang++" if c0 in ("g++", "clang++") else "clang"
+        return [compiler] + CLANG_TARGET + inc + cmd[1:] + ["-Wno-error=return-mismatch", "-fms-extensions"]
     if VARIANT == "gcc" or "-msoft-float" not in cmd:
         return cmd
     extra = ["-fms-extensions"] if BITS64 else []
@@ -41,7 +49,7 @@ def compile_ee(cmd, src, o):
         return r
     i = pathlib.Path(str(o)[:-2] + ".i")
     i.write_text(eeconst.transform(r.stdout))
-    if BITS64 and cmd[0] == "clang" and not o.name.startswith("nl_"):  # the game's pointers: 4 bytes (not the maths library: no game text)
+    if BITS64 and cmd[0] in ("clang", "clang++") and not o.name.startswith("nl_"):  # the game's pointers: 4 bytes (not the maths library: no game text)
         import ptr32
         std = next((a for a in cmd if a.startswith("-std=")), "-std=gnu89")
         try:
@@ -50,7 +58,7 @@ def compile_ee(cmd, src, o):
         except RuntimeError as e:
             return subprocess.CompletedProcess(cmd, 1, "", f"ptr32: {e}\n")
         i.write_text(text, encoding="latin-1")
-    if cmd[0] == "clang":  # no -fpreprocessed: the input is named as preprocessed, and the forced includes are dropped
+    if cmd[0] in ("clang", "clang++"):  # no -fpreprocessed: the input is named as preprocessed, and the forced includes are dropped
         c2, skip = [], False
         for a in cmd:
             if skip:
@@ -67,7 +75,12 @@ def compile_ee(cmd, src, o):
                 return r
             text, _ = irfix.fix(ll.read_text())
             ll.write_text(text)
-            return subprocess.run(["llc", "-O2", "-filetype=obj", "-relocation-model=static", str(ll), "-o", str(o)], cwd=ROOT, capture_output=True, text=True)
+            llc_args = ["llc", "-O2", "-filetype=obj"]
+            if IOS:
+                llc_args += ["-mtriple=arm64-apple-ios15.0", "-relocation-model=pic"]
+            else:
+                llc_args += ["-relocation-model=static"]
+            return subprocess.run(llc_args + [str(ll), "-o", str(o)], cwd=ROOT, capture_output=True, text=True)
         return subprocess.run(c2 + ["-x", "cpp-output", str(i), "-o", str(o)], cwd=ROOT, capture_output=True, text=True)
     return subprocess.run(cmd + ["-fpreprocessed", str(i), "-o", str(o)], cwd=ROOT, capture_output=True, text=True)
 
@@ -102,9 +115,13 @@ def main():
         if blank:
             (DATA / "SKELETON").write_text("built from port/data: finish with make_dat.py\n")
         for f in (sorted((ROOT / "port/data").glob("*.s")) if blank else real):
-            r = subprocess.run([PREFIX + "as"] + ([] if WIN else ["--64"]) + [str(f), "-o", str(DATA / (f.name[:-2] + ".o"))], capture_output=True, text=True)
+            if IOS:
+                as_cmd = ["clang"] + CLANG_TARGET + ["-c", str(f), "-o", str(DATA / (f.name[:-2] + ".o"))]
+            else:
+                as_cmd = [PREFIX + "as"] + ([] if WIN else ["--64"]) + [str(f), "-o", str(DATA / (f.name[:-2] + ".o"))]
+            r = subprocess.run(as_cmd, capture_output=True, text=True)
             if r.returncode:
-                print("FAILED", f.name, r.stderr.splitlines()[0][:150])
+                print("FAILED", f.name, r.stderr.splitlines()[0][:150] if r.stderr else "assembly error")
         objs += [str(o) for o in sorted(DATA.glob("*.o"))]
     else:
         objs += [str(o) for o in sorted((ROOT / "port/build/obj_data").glob("*.o"))]  # from gen_data.py
@@ -160,8 +177,8 @@ def main():
     for f in sorted((ROOT / "port/src/gs").glob("*.c")):
         o = OBJ / ("gs_" + f.stem + ".o")
         r = run(["gcc", "-m32", "-std=gnu99", "-c", "-O2", "-g", "-fno-pic", "-msse2", "-mfpmath=sse", "-fno-strict-aliasing",
-                            "-Wall", "-Wno-unused", "-Wno-misleading-indentation", f"-I{gen}", str(f), "-o", str(o)], cwd=ROOT,
-                           capture_output=True, text=True)
+                 "-Wall", "-Wno-unused", "-Wno-misleading-indentation", f"-I{gen}", str(f), "-o", str(o)], cwd=ROOT,
+                capture_output=True, text=True)
         if r.returncode:
             print("FAILED", f.name, "\n".join(l for l in r.stderr.splitlines() if "error" in l)[:400])
         else:
@@ -174,8 +191,8 @@ def main():
             objs.append(str(o))
             continue
         r = run(["g++", "-m32", "-std=c++17", "-c", "-O2", "-g", "-fno-pic", "-msse2", "-mfpmath=sse", "-fno-exceptions",
-                            "-fno-rtti", "-w", f"-I{imgui}", f"-I{ROOT / 'port/src/gs'}", f"-I{gen}", str(f), "-o", str(o)], cwd=ROOT,
-                           capture_output=True, text=True)
+                 "-fno-rtti", "-w", f"-I{imgui}", f"-I{ROOT / 'port/src/gs'}", f"-I{gen}", str(f), "-o", str(o)], cwd=ROOT,
+                capture_output=True, text=True)
         if r.returncode:
             print("FAILED", f.name, "\n".join(l for l in r.stderr.splitlines() if "error" in l)[:600])
         else:
@@ -200,7 +217,8 @@ def main():
     # Native Windows has a 32767-character CreateProcess limit; absolute object paths exceed it.
     argsfile = ROOT / "port/build/nm-objects.rsp"
     argsfile.write_text("\n".join('"' + p.replace('\\', '/') + '"' for p in objs))
-    out = subprocess.run([PREFIX + "nm", "-A", "@" + str(argsfile)], capture_output=True, text=True, check=True).stdout
+    nm_bin = "llvm-nm" if IOS else PREFIX + "nm"
+    out = subprocess.run([nm_bin, "-A", "@" + str(argsfile)], capture_output=True, text=True, check=True).stdout
     for l in out.splitlines():
         m = re.match(r"\S+:\s*([0-9a-f]*)\s+(\w)\s+(\S+)$", l)
         if not m:
