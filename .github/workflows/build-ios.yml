@@ -1,4 +1,4 @@
-# Stage 1: prepare the iOS toolchain pieces and print what we need to see in the repo's build tools.
+# Stage 1: prepare the iOS toolchain pieces and test the compilation pipeline against decompiled source.
 # Put this file at .github/workflows/build-ios.yml in your fork, then Actions > build-ios > Run workflow.
 name: build-ios
 
@@ -66,24 +66,45 @@ jobs:
           echo "---- port/setup/build.sh"
           cat port/setup/build.sh
 
-      - name: Test ARM64 ptr32 lowering
+      - name: Test Single Source File Pipeline on ARM64
         continue-on-error: true
         run: |
+          . .venv/bin/activate
           LLVM_BIN="$(brew --prefix llvm)/bin"
-          
-          cat << 'EOF' > test_ptr32.c
-          struct Foo {
-              int * __ptr32 __uptr ptr;
-          };
-          void test(struct Foo *f) {
-              *f->ptr = 42;
-          }
-          EOF
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          export PATH="$LLVM_BIN:$PATH"
+          export PYTHONPATH="$PWD/port/tools:$PYTHONPATH"
 
-          echo "=== 1. Clang AST / IR ==="
-          "$LLVM_BIN/clang" -target arm64-apple-ios15.0 -fms-extensions -S -emit-llvm test_ptr32.c -o test_ptr32.ll
-          cat test_ptr32.ll | head -n 30
+          # Locate the first valid C file from src/
+          TEST_SRC=$(find src -name "*.c" | head -n 1)
+          echo "Testing pipeline on: $TEST_SRC"
 
-          echo "=== 2. LLC Code Generation ==="
-          "$LLVM_BIN/llc" -mtriple=arm64-apple-ios15.0 -filetype=obj test_ptr32.ll -o test_ptr32.o
-          echo "LLC generated test_ptr32.o successfully."
+          mkdir -p port/build/test_obj
+
+          # 1. Preprocess with Clang targeting iOS
+          "$LLVM_BIN/clang" --target=arm64-apple-ios15.0 -isysroot "$SDK_PATH" \
+            -std=gnu89 -E "$TEST_SRC" \
+            -Iinclude -Iport/include -include port_compat.h \
+            -o port/build/test_obj/test.i.raw
+
+          # 2. Run eeconst transform
+          python3 -c "import eeconst, pathlib; p=pathlib.Path('port/build/test_obj/test.i.raw'); pathlib.Path('port/build/test_obj/test.i').write_text(eeconst.transform(p.read_text()))"
+
+          # 3. Run ptr32 transform
+          python3 -c "import ptr32, pathlib; t=ptr32.transform('port/build/test_obj/test.i', ['-x', 'cpp-output', '--target=arm64-apple-ios15.0', '-isysroot', '$SDK_PATH', '-std=gnu89', '-fms-extensions', '-w']); pathlib.Path('port/build/test_obj/test.i').write_text(t, encoding='latin-1')"
+          echo "ptr32 transform passed."
+
+          # 4. Emit LLVM IR
+          "$LLVM_BIN/clang" --target=arm64-apple-ios15.0 -isysroot "$SDK_PATH" \
+            -std=gnu89 -fms-extensions -O2 -w -S -emit-llvm -x cpp-output \
+            port/build/test_obj/test.i -o port/build/test_obj/test.ll
+
+          # 5. Run irfix transform
+          python3 -c "import irfix, pathlib; p=pathlib.Path('port/build/test_obj/test.ll'); text, n = irfix.fix(p.read_text()); p.write_text(text); print(f'irfix applied {n} fixes')"
+
+          # 6. LLC to Mach-O ARM64 object file
+          "$LLVM_BIN/llc" -mtriple=arm64-apple-ios15.0 -O2 -filetype=obj -relocation-model=pic \
+            port/build/test_obj/test.ll -o port/build/test_obj/test.o
+
+          echo "Successfully compiled $TEST_SRC to ARM64 iOS object file!"
+          file port/build/test_obj/test.o
