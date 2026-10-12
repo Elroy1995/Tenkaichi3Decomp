@@ -37,20 +37,20 @@ def link(objs, extra):
         sdl_dir = ROOT / "ios-deps/sdl3"
         mvk_flags = find_mvk_flags()
 
-        ios_link_flags = [
-            "-Wl,-no_compact_unwind",
-            "-Wl,-pagezero_size,0x10000",
-            "-Wl,-image_base,0x20000000",
-            "-Wl,-bind_at_load",
-            "-Wl,-no_pie"
-        ]
+        # Check for Homebrew LLVM lld
+        brew_llvm = pathlib.Path("/opt/homebrew/opt/llvm/bin")
+        if not brew_llvm.exists():
+            brew_llvm = pathlib.Path("/usr/local/opt/llvm/bin")
 
         cmd = [
-            "clang++",
+            str(brew_llvm / "clang++") if (brew_llvm / "clang++").exists() else "clang++",
             "-target", "arm64-apple-ios15.0",
             "-isysroot", sdk_path,
+            "-fuse-ld=lld",
+            "-Wl,-pagezero_size,0x10000",
+            "-Wl,-image_base,0x20000000",
             "-o", str(EXE)
-        ] + ios_link_flags + extra + objs + [
+        ] + extra + objs + [
             f"-L{sdl_dir / 'lib'}", "-lSDL3"
         ] + mvk_flags + [
             "-framework", "Metal",
@@ -74,7 +74,6 @@ def link(objs, extra):
                            "-Wl,-rpath,$ORIGIN/lib"] + common + base64, capture_output=True, text=True)
 
 def generate_mem_file():
-    """Generates the .mem layout mapping required by strip_data.py and setup."""
     mem_file = B / (EXE.name + ".mem")
     nm_bin = "llvm-nm" if IOS else PREFIX + "nm"
     try:
@@ -90,6 +89,8 @@ def main():
 
     need = set(re.findall(r"undefined reference to `(\w+)'", r.stderr))
     for m in re.finditer(r'"_(\w+)", referenced from:', r.stderr):
+        need.add(m.group(1))
+    for m in re.finditer(r"undefined symbol: _?(\w+)", r.stderr):
         need.add(m.group(1))
 
     clean_need = sorted(need)
@@ -115,8 +116,7 @@ def main():
         print("--- Linker Errors ---")
         print(r.stderr)
         sys.exit(1)
-    
-    # Generate memory map on successful link
+
     generate_mem_file()
 
 if __name__ == "__main__":
