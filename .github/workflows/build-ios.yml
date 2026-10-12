@@ -65,3 +65,25 @@ jobs:
           head -80 port/tools/link.py
           echo "---- port/setup/build.sh"
           cat port/setup/build.sh
+
+      - name: Test ARM64 ptr32 lowering
+        continue-on-error: true
+        run: |
+          LLVM_BIN="$(brew --prefix llvm)/bin"
+          
+          cat << 'EOF' > test_ptr32.c
+          struct Foo {
+              int * __ptr32 __uptr ptr;
+          };
+          void test(struct Foo *f) {
+              *f->ptr = 42;
+          }
+          EOF
+
+          echo "=== 1. Clang AST / IR ==="
+          "$LLVM_BIN/clang" -target arm64-apple-ios15.0 -fms-extensions -S -emit-llvm test_ptr32.c -o test_ptr32.ll
+          cat test_ptr32.ll | head -n 30
+
+          echo "=== 2. LLC Code Generation ==="
+          "$LLVM_BIN/llc" -mtriple=arm64-apple-ios15.0 -filetype=obj test_ptr32.ll -o test_ptr32.o
+          echo "LLC generated test_ptr32.o successfully."
