@@ -33,19 +33,6 @@ def get_brew_llvm_bin():
             return path
     return None
 
-def find_lld_path():
-    llvm_bin = get_brew_llvm_bin()
-    if llvm_bin:
-        for name in ["lld", "ld64.lld", "ld.lld"]:
-            candidate = llvm_bin / name
-            if candidate.exists():
-                return str(candidate)
-    for name in ["lld", "ld64.lld", "ld.lld"]:
-        w = shutil.which(name)
-        if w:
-            return w
-    return "/usr/bin/ld"
-
 def link(objs, extra):
     if WIN:
         common = ["-Wl,--defsym=D_3BE71C=0x3BE71C", "-Wl,--wrap=Progress_Main", f"-Wl,-Map={EXE}.map"]
@@ -62,22 +49,28 @@ def link(objs, extra):
         sdk_path = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], text=True).strip()
         sdl_dir = ROOT / "ios-deps/sdl3"
         mvk_flags = find_mvk_flags()
-        lld_exe = find_lld_path()
+        llvm_bin = get_brew_llvm_bin()
 
-        cmd = [
-            lld_exe,
-            "-flavor", "darwin",
-            "-arch", "arm64",
-            "-platform_version", "ios", "15.0", "15.0",
-            "-syslibroot", sdk_path,
-            "-image_base", "0x20000000",
-            "-pagezero_size", "0x10000",
+        compiler = str(llvm_bin / "clang++") if (llvm_bin and (llvm_bin / "clang++").exists()) else "clang++"
+        lld_path = str(llvm_bin / "ld64.lld") if (llvm_bin and (llvm_bin / "ld64.lld").exists()) else shutil.which("ld64.lld")
+
+        link_args = [
+            compiler,
+            "--target=arm64-apple-ios15.0",
+            "-isysroot", sdk_path,
+        ]
+
+        if lld_path and pathlib.Path(lld_path).exists():
+            link_args.append(f"--ld-path={lld_path}")
+
+        # Pass options to accommodate 32-bit address space relocations
+        link_args += [
+            "-Wl,-pagezero_size,0x10000",
+            "-Wl,-image_base,0x20000000",
+            "-Wl,-read_only_relocs,suppress",
             "-o", str(EXE)
         ] + extra + objs + [
-            f"-L{sdl_dir / 'lib'}", "-lSDL3",
-            "-lSystem",
-            "-lc++",
-            "-lc++abi"
+            f"-L{sdl_dir / 'lib'}", "-lSDL3"
         ] + mvk_flags + [
             "-framework", "Metal",
             "-framework", "Foundation",
@@ -89,7 +82,7 @@ def link(objs, extra):
             "-framework", "GameController",
             "-framework", "AVFoundation"
         ]
-        return subprocess.run(cmd, capture_output=True, text=True)
+        return subprocess.run(link_args, capture_output=True, text=True)
 
     # Linux
     m = "-m64" if VARIANT == "clang64" else "-m32"
@@ -101,7 +94,8 @@ def link(objs, extra):
 
 def generate_mem_file():
     mem_file = B / (EXE.name + ".mem")
-    nm_bin = "llvm-nm" if IOS else PREFIX + "nm"
+    llvm_bin = get_brew_llvm_bin()
+    nm_bin = str(llvm_bin / "llvm-nm") if (llvm_bin and (llvm_bin / "llvm-nm").exists()) else "llvm-nm"
     try:
         out = subprocess.run([nm_bin, "-n", str(EXE)], capture_output=True, text=True, check=True).stdout
         mem_file.write_text(out)
