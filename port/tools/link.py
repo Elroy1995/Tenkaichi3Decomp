@@ -37,11 +37,6 @@ def link(objs, extra):
         sdl_dir = ROOT / "ios-deps/sdl3"
         mvk_flags = find_mvk_flags()
 
-        # Mach-O linker flags:
-        # -pagezero_size,0x10000 allows low-address execution & 32-bit pointer targets
-        # -image_base,0x20000000 links in the designated 32-bit address space
-        # -no_compact_unwind disables compact unwind warnings/blocks on custom assembly
-        # -bind_at_load resolves pointer relocations immediately at load time
         ios_link_flags = [
             "-Wl,-no_compact_unwind",
             "-Wl,-pagezero_size,0x10000",
@@ -78,6 +73,17 @@ def link(objs, extra):
                           ["-static-libstdc++", "-static-libgcc", "-Wl,-Bstatic", "-lstdc++", "-Wl,-Bdynamic", "-lm", "-lpthread", "-lSDL3", "-rdynamic",
                            "-Wl,-rpath,$ORIGIN/lib"] + common + base64, capture_output=True, text=True)
 
+def generate_mem_file():
+    """Generates the .mem layout mapping required by strip_data.py and setup."""
+    mem_file = B / (EXE.name + ".mem")
+    nm_bin = "llvm-nm" if IOS else PREFIX + "nm"
+    try:
+        out = subprocess.run([nm_bin, "-n", str(EXE)], capture_output=True, text=True, check=True).stdout
+        mem_file.write_text(out)
+        print(f"Generated memory layout map: {mem_file.name}")
+    except Exception as e:
+        print(f"Warning: could not generate {mem_file.name}: {e}")
+
 def main():
     objs = [str(o) for o in sorted(OBJ.glob("*.o")) + sorted(DATA.glob("*.o"))]
     r = link(objs, [])
@@ -109,6 +115,9 @@ def main():
         print("--- Linker Errors ---")
         print(r.stderr)
         sys.exit(1)
+    
+    # Generate memory map on successful link
+    generate_mem_file()
 
 if __name__ == "__main__":
     main()
