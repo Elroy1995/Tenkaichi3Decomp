@@ -53,7 +53,14 @@ def compile_ee(cmd, src, o):
         import ptr32
         std = next((a for a in cmd if a.startswith("-std=")), "-std=gnu89")
         if IOS:
-            target_flags = ["--target=arm64-apple-ios15.0.0", "-Wno-availability"]
+            # Sanitize availability annotations that trigger libclang version parse panics
+            raw_text = i.read_text(encoding="latin-1")
+            clean_lines = [
+                l for l in raw_text.splitlines() 
+                if "__attribute__((availability" not in l and "expected a version" not in l
+            ]
+            i.write_text("\n".join(clean_lines) + "\n", encoding="latin-1")
+            target_flags = ["-target", "arm64-apple-ios15.0", "-Wno-availability"]
         else:
             target_flags = CLANG_TARGET or ["-m64"]
         try:
