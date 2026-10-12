@@ -54,6 +54,9 @@ jobs:
           export BT3_CC=ios64
           export BT3_SDL3="$PWD/ios-deps/sdl3"
 
+          echo "=== port/include/newlib_shim.h ==="
+          cat port/include/newlib_shim.h 2>/dev/null || true
+
           mkdir -p port/build/obj_ios64
 
           echo "Compiling game sources with BT3_CC=ios64..."
