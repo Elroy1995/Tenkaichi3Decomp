@@ -28,10 +28,23 @@ def get_brew_llvm_bin():
             return p
     except Exception:
         pass
-    for p in [pathlib.Path("/opt/homebrew/opt/llvm/bin"), pathlib.Path("/usr/local/opt/llvm/bin")]:
-        if p.exists():
-            return p
+    for path in [pathlib.Path("/opt/homebrew/opt/llvm/bin"), pathlib.Path("/usr/local/opt/llvm/bin")]:
+        if path.exists():
+            return path
     return None
+
+def find_lld_path():
+    llvm_bin = get_brew_llvm_bin()
+    if llvm_bin:
+        for name in ["lld", "ld64.lld", "ld.lld"]:
+            candidate = llvm_bin / name
+            if candidate.exists():
+                return str(candidate)
+    for name in ["lld", "ld64.lld", "ld.lld"]:
+        w = shutil.which(name)
+        if w:
+            return w
+    return "/usr/bin/ld"
 
 def link(objs, extra):
     if WIN:
@@ -49,12 +62,8 @@ def link(objs, extra):
         sdk_path = subprocess.check_output(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"], text=True).strip()
         sdl_dir = ROOT / "ios-deps/sdl3"
         mvk_flags = find_mvk_flags()
-        llvm_bin = get_brew_llvm_bin()
+        lld_exe = find_lld_path()
 
-        lld_exe = str(llvm_bin / "lld") if (llvm_bin and (llvm_bin / "lld").exists()) else shutil.which("lld")
-        clang_lib = llvm_bin.parent / "lib/clang" if llvm_bin else pathlib.Path()
-
-        # Direct invocation of lld with Darwin Mach-O flavor
         cmd = [
             lld_exe,
             "-flavor", "darwin",
