@@ -52,7 +52,10 @@ def compile_ee(cmd, src, o):
     if BITS64 and cmd[0] in ("clang", "clang++") and is_game_file:
         import ptr32
         std = next((a for a in cmd if a.startswith("-std=")), "-std=gnu89")
-        target_flags = CLANG_TARGET if IOS else (CLANG_TARGET or ["-m64"])
+        if IOS:
+            target_flags = ["--target=arm64-apple-ios15.0.0", "-Wno-availability"]
+        else:
+            target_flags = CLANG_TARGET or ["-m64"]
         try:
             text = ptr32.transform(str(i), ["-x", "cpp-output"] + target_flags + [std, "-fms-extensions", "-w", "-Wno-error=return-mismatch", "-Wno-return-type"] +
                                    (["-mno-ms-bitfields"] if WIN else []))
