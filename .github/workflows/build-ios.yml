@@ -45,18 +45,7 @@ jobs:
           . .venv/bin/activate
           pip install libclang
 
-      - name: Inspect remaining failure points
-        run: |
-          echo "=== plat_mc.c lines 35-55 ==="
-          sed -n '35,55p' port/src/plat_mc.c || true
-
-          echo "=== plat_stub.c lines 60-75 ==="
-          sed -n '60,75p' port/src/plat_stub.c || true
-
-          echo "=== menu_c_e.c lines 1110-1130 ==="
-          find src -name "menu_c_e.c" -exec sed -n '1110,1130p' {} + || true
-
-      - name: Run Full Game Source Compilation (undefined.py)
+      - name: Compile and Link Game (undefined.py + link.py)
         run: |
           . .venv/bin/activate
           LLVM_BIN="$(brew --prefix llvm)/bin"
@@ -69,3 +58,20 @@ jobs:
 
           echo "Compiling game sources with BT3_CC=ios64..."
           python3 port/tools/undefined.py
+
+          echo "Linking iOS Mach-O executable..."
+          python3 port/tools/link.py
+
+          file port/build/bt3_ios || true
+
+      - name: Upload iOS Executable Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tenkaichi3-iOS-Binary
+          path: |
+            port/build/bt3_ios
+            port/build/undefined.txt
+            port/build/stubs.txt
+            port/build/gen/stubs.c
+          if-no-files-found: warn
