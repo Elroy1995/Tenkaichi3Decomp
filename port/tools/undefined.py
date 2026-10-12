@@ -16,21 +16,20 @@ def variant(cmd):
     if WIN:
         cmd = [a for a in cmd if a != "-m64"]
         inc = [f"-I{sdl3() / 'include'}"] if sdl3() else []
-        if cmd[0] in ("gcc", "g++") and "-msoft-float" not in cmd:  # the renderer, the settings window: the Windows gcc
+        if cmd[0] in ("gcc", "g++") and "-msoft-float" not in cmd:
             return [PREFIX + cmd[0]] + cmd[1:] + inc
     if IOS:
-        # Strip x86 and legacy GCC flags that Apple Clang rejects
-        strip_flags = {"-m32", "-m64", "-msoft-float", "-mno-sse", "-mno-mmx", "-malign-double", "-msse2", "-mfpmath=sse"}
+        strip_flags = {"-m32", "-m64", "-msoft-float", "-mno-sse", "-mno-mmx", "-malign-double", "-msse2", "-mfpmath=sse", "-fno-pic"}
         cmd = [a for a in cmd if a not in strip_flags]
         inc = [f"-I{sdl3() / 'include'}"] if sdl3() else []
         c0 = cmd[0]
         compiler = "clang++" if c0 in ("g++", "clang++") else "clang"
-        return [compiler] + CLANG_TARGET + inc + cmd[1:] + ["-Wno-error=return-mismatch", "-fms-extensions"]
+        return [compiler] + CLANG_TARGET + inc + cmd[1:] + ["-Wno-error=return-mismatch", "-Wno-return-type", "-fms-extensions"]
     if VARIANT == "gcc" or "-msoft-float" not in cmd:
         return cmd
     extra = ["-fms-extensions"] if BITS64 else []
-    if WIN:  # GCC's structure layout, not Microsoft's bit-field rules: the game's structures are the PS2's
-        extra += ["-mno-ms-bitfields", "-D__CRT__NO_INLINE"]  # (no inline maths of the headers: they use long double) + ([f"-I{sdl3() / 'include'}"] if sdl3() else [])
+    if WIN:
+        extra += ["-mno-ms-bitfields", "-D__CRT__NO_INLINE"]
     return ["clang"] + CLANG_TARGET + cmd[1:] + ["-mno-x87", "-Wno-error=return-mismatch"] + extra
 
 def run(cmd, **kw):
@@ -38,7 +37,7 @@ def run(cmd, **kw):
 
 CC = ["gcc", "-m32", "-std=gnu89", "-c", "-O2", "-g", "-fno-strict-aliasing", "-ffp-contract=off", "-fcommon", "-w", "-fno-pic", "-fno-stack-protector", "-fno-builtin", "-msoft-float", "-mno-sse", "-mno-mmx", "-malign-double", "-include", "port_libm.h",
       "-Iinclude", "-Iport/include", "-include", "port_compat.h"]
-TEXT_END, GAME_END = 0x2BF6B0, 0x273CF0  # end of all code; end of game code (libraries follow)
+TEXT_END, GAME_END = 0x2BF6B0, 0x273CF0
 
 def compile_ee(cmd, src, o):
     """Compiles src with the PS2 compiler's float constants: preprocess, eeconst.transform, compile the result."""
@@ -49,16 +48,17 @@ def compile_ee(cmd, src, o):
         return r
     i = pathlib.Path(str(o)[:-2] + ".i")
     i.write_text(eeconst.transform(r.stdout))
-    if BITS64 and cmd[0] in ("clang", "clang++") and not o.name.startswith("nl_"):  # the game's pointers: 4 bytes (not the maths library: no game text)
+    if BITS64 and cmd[0] in ("clang", "clang++") and not o.name.startswith("nl_"):
         import ptr32
         std = next((a for a in cmd if a.startswith("-std=")), "-std=gnu89")
+        target_flags = CLANG_TARGET if IOS else (CLANG_TARGET or ["-m64"])
         try:
-            text = ptr32.transform(str(i), ["-x", "cpp-output"] + (CLANG_TARGET or ["-m64"]) + [std, "-fms-extensions", "-w", "-Wno-error=return-mismatch"] +
+            text = ptr32.transform(str(i), ["-x", "cpp-output"] + target_flags + [std, "-fms-extensions", "-w", "-Wno-error=return-mismatch", "-Wno-return-type"] +
                                    (["-mno-ms-bitfields"] if WIN else []))
         except RuntimeError as e:
             return subprocess.CompletedProcess(cmd, 1, "", f"ptr32: {e}\n")
         i.write_text(text, encoding="latin-1")
-    if cmd[0] in ("clang", "clang++"):  # no -fpreprocessed: the input is named as preprocessed, and the forced includes are dropped
+    if cmd[0] in ("clang", "clang++"):
         c2, skip = [], False
         for a in cmd:
             if skip:
@@ -67,7 +67,7 @@ def compile_ee(cmd, src, o):
                 skip = True
             else:
                 c2.append(a)
-        if BITS64:  # through LLVM IR: irfix.py repairs what the code generator cannot select for 4-byte pointers
+        if BITS64:
             import irfix
             ll = pathlib.Path(str(o)[:-2] + ".ll")
             r = subprocess.run(c2 + ["-S", "-emit-llvm", "-x", "cpp-output", str(i), "-o", str(ll)], cwd=ROOT, capture_output=True, text=True)
@@ -92,6 +92,24 @@ def cc(f):
         print("no C for:", f.name, " ".join(missing))
     return o if r.returncode == 0 else None, f, r.stderr
 
+def macho_convert_asm(text):
+    """Converts GNU/ELF .section directives to Mach-O directives for Apple Clang as."""
+    out = []
+    for line in text.splitlines():
+        l = line.strip()
+        if l.startswith(".section"):
+            if ".rodata" in l or ".lit4" in l:
+                out.append("\t.const_data")
+            elif ".sbss" in l or ".bss" in l:
+                out.append("\t.data")
+            elif ".sdata" in l or ".data" in l:
+                out.append("\t.data")
+            else:
+                out.append("\t.data")
+        else:
+            out.append(line)
+    return "\n".join(out) + "\n"
+
 def main():
     OBJ.mkdir(parents=True, exist_ok=True)
     fs = portsrc.sources()
@@ -102,10 +120,6 @@ def main():
         print("FAILED", f.name, next((l for l in e.splitlines() if "rror" in l or l.startswith("ptr32")), e.strip()[:150])[:200])
     objs = [str(o) for o, _, _ in res if o]
     if BITS64:
-        # The game's data tables, assembled for this target: with their values (gen_data.py's sources, made from the
-        # user's disc) when those exist, else as blank tables of the same shape (port/data, make_skeleton.py), whose
-        # values the program fetches from the disc at start. BT3_SKELETON=1 takes the blank ones in any case; that
-        # is how releases are built, so that a build needs no disc.
         real = sorted((ROOT / "port/build/gen/data").glob("*.s"))
         blank = os.environ.get("BT3_SKELETON") == "1" or not real
         DATA.mkdir(exist_ok=True)
@@ -115,8 +129,12 @@ def main():
         if blank:
             (DATA / "SKELETON").write_text("built from port/data: finish with make_dat.py\n")
         for f in (sorted((ROOT / "port/data").glob("*.s")) if blank else real):
+            asm_file = f
             if IOS:
-                as_cmd = ["clang"] + CLANG_TARGET + ["-c", str(f), "-o", str(DATA / (f.name[:-2] + ".o"))]
+                converted_s = DATA / f.name
+                converted_s.write_text(macho_convert_asm(f.read_text()))
+                asm_file = converted_s
+                as_cmd = ["clang"] + CLANG_TARGET + ["-c", str(asm_file), "-o", str(DATA / (f.name[:-2] + ".o"))]
             else:
                 as_cmd = [PREFIX + "as"] + ([] if WIN else ["--64"]) + [str(f), "-o", str(DATA / (f.name[:-2] + ".o"))]
             r = subprocess.run(as_cmd, capture_output=True, text=True)
@@ -124,9 +142,9 @@ def main():
                 print("FAILED", f.name, r.stderr.splitlines()[0][:150] if r.stderr else "assembly error")
         objs += [str(o) for o in sorted(DATA.glob("*.o"))]
     else:
-        objs += [str(o) for o in sorted((ROOT / "port/build/obj_data").glob("*.o"))]  # from gen_data.py
-    # PC-only code: the vector-library references under the game's names, and port/src.
-    for f in sorted((ROOT / "port/third_party/newlib_libm").glob("*.c")):  # the PS2's maths library, software float
+        objs += [str(o) for o in sorted((ROOT / "port/build/obj_data").glob("*.o"))]
+
+    for f in sorted((ROOT / "port/third_party/newlib_libm").glob("*.c")):
         o = OBJ / ("nl_" + f.stem + ".o")
         r = compile_ee(["gcc", "-m32", "-std=gnu89", "-c", "-O2", "-g", "-fno-pic", "-msoft-float", "-mno-sse", "-mno-mmx",
                         "-malign-double", "-fno-strict-aliasing", "-ffp-contract=off", "-fno-builtin", "-w",
@@ -135,33 +153,31 @@ def main():
             print("FAILED", f.name, r.stderr.splitlines()[0][:150])
         else:
             objs.append(str(o))
-    # renderer: ordinary host code, hardware float. Its shaders are compiled to SPIR-V and embedded.
+
     gen = ROOT / "port/build/gen/gs"
     gen.mkdir(parents=True, exist_ok=True)
     arrays = []
-    # gsnz.frag: gs.frag without its depth output (NO_FRAG_DEPTH), for the draws that do not need it
     nz = gen / "gsnz.frag"
     nz_text = (ROOT / "port/src/gs/shaders/gs.frag").read_text().replace("\n", "\n#define NO_FRAG_DEPTH\n", 1)
     if not nz.exists() or nz.read_text() != nz_text:
         nz.write_text(nz_text)
     shader_sources = sorted((ROOT / "port/src/gs/shaders").glob("*.*")) + [nz]
-    for src in shader_sources:  # gs.vert -> kGsVertSpv, outline.frag -> kOutlineFragSpv
+    for src in shader_sources:
         stage = src.suffix[1:]
         name = "k" + src.stem.capitalize() + stage.capitalize() + "Spv"
         spv = gen / (src.name + ".spv")
         if shutil.which("glslc") is None and spv.exists() and spv.stat().st_mtime >= src.stat().st_mtime:
-            pass  # no shader compiler here (the release container): the compiled shader that was put in place is current
+            pass
         else:
             if shutil.which("glslc") is not None:
                 r = subprocess.run(["glslc", f"-fshader-stage={stage}", str(src), "-o", str(spv)], capture_output=True, text=True)
-            else:  # the reference compiler of the same language (package glslang-tools)
+            else:
                 r = subprocess.run(["glslangValidator", "-V", "-S", stage, str(src), "-o", str(spv)], capture_output=True, text=True)
             if r.returncode:
                 print("FAILED shader", src.name, r.stderr[:300])
                 continue
         arrays.append(f"static const unsigned char {name}[] = {{" + ",".join(str(b) for b in spv.read_bytes()) + "};\n")
-    # The GL back end (gs_gl.c) compiles the GLSL at run time (it translates Vulkan GLSL to GL 3.3 the way
-    # port/tools/glprobe.c proved), so the sources are embedded here too, NUL-terminated.
+
     for src in shader_sources:
         if src.suffix not in (".vert", ".frag"):
             continue
@@ -169,11 +185,12 @@ def main():
         name = "k" + src.stem.capitalize() + stage.capitalize() + "Glsl"
         data = src.read_bytes() + b"\0"
         arrays.append(f"static const unsigned char {name}[] = {{" + ",".join(str(b) for b in data) + "};\n")
-    # the side bars' two pictures (port/assets/bars), as bytes in the program: nothing to ship beside it
+
     bars = "".join(f"static const unsigned char kBars{n.capitalize()}Png[] = {{" + ",".join(str(b) for b in (ROOT / "port/assets/bars" / (n + ".png")).read_bytes()) + "};\n"
                    for n in ("trim", "fill"))
     (gen / "bars_png.h").write_text("/* generated from port/assets/bars by port/tools/undefined.py */\n" + bars)
     (gen / "shaders.h").write_text("/* generated from port/src/gs/shaders by port/tools/undefined.py */\n" + "".join(arrays))
+
     for f in sorted((ROOT / "port/src/gs").glob("*.c")):
         o = OBJ / ("gs_" + f.stem + ".o")
         r = run(["gcc", "-m32", "-std=gnu99", "-c", "-O2", "-g", "-fno-pic", "-msse2", "-mfpmath=sse", "-fno-strict-aliasing",
@@ -183,7 +200,7 @@ def main():
             print("FAILED", f.name, "\n".join(l for l in r.stderr.splitlines() if "error" in l)[:400])
         else:
             objs.append(str(o))
-    # C++: the settings window (port/src/gs/ui.cpp) and Dear ImGui. The library is only compiled when it changed.
+
     imgui = ROOT / "port/third_party/imgui"
     for f in sorted(imgui.glob("*.cpp")) + sorted((ROOT / "port/src/gs").glob("*.cpp")):
         o = OBJ / ("cxx_" + f.stem + ".o")
@@ -197,15 +214,16 @@ def main():
             print("FAILED", f.name, "\n".join(l for l in r.stderr.splitlines() if "error" in l)[:600])
         else:
             objs.append(str(o))
+
     for f in [ROOT / "src/port/vu0_a.c", ROOT / "src/port/vu0_b.c"] + sorted((ROOT / "port/src").glob("*.c")):
         o = OBJ / ("pc_" + f.stem + ".o")
         names = ["-include", "vu0_names.h", "-DREF_VU0_EXTERN_ARITH"] if f.parent.name == "port" and f.parent.parent.name == "src" else []
         soft = [] if f.name in ("plat_libm.c", "plat_fastvec.c") else ["-msoft-float", "-mno-sse", "-mno-mmx", "-DSF_FAST_CALLS", "-include", "math.h", "-include", "stdlib.h", "-include", "port_libm.h"]
         cmd = ["gcc", "-m32", "-std=gnu99", "-c", "-O2", "-g", "-fno-pic", "-malign-double", "-fno-strict-aliasing",
                "-ffp-contract=off", "-fno-builtin", "-w", "-Iinclude", "-Iport/include", "-Iport/src"] + soft + names
-        if os.environ.get("BT3_PORT_CFLAGS"):  # profiling: e.g. -fno-omit-frame-pointer
+        if os.environ.get("BT3_PORT_CFLAGS"):
             cmd += os.environ["BT3_PORT_CFLAGS"].split()
-        if soft and not names:  # the port's own soft-float code: PS2 constants; the vector references are written for the host
+        if soft and not names:
             r = compile_ee(cmd, f, o)
         else:
             r = run(cmd + [str(f), "-o", str(o)], cwd=ROOT, capture_output=True, text=True)
@@ -213,8 +231,8 @@ def main():
             print("FAILED", f.name, r.stderr.splitlines()[0][:150])
         else:
             objs.append(str(o))
+
     defined, undef = set(), collections.Counter()
-    # Native Windows has a 32767-character CreateProcess limit; absolute object paths exceed it.
     argsfile = ROOT / "port/build/nm-objects.rsp"
     argsfile.write_text("\n".join('"' + p.replace('\\', '/') + '"' for p in objs))
     nm_bin = "llvm-nm" if IOS else PREFIX + "nm"
