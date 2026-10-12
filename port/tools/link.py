@@ -11,14 +11,10 @@ from toolchain import ROOT, VARIANT, WIN, IOS, PREFIX, CLANG_TARGET, OBJ, DATA, 
 B = ROOT / "port/build"
 
 def find_mvk_flags():
-    """Finds the MoltenVK framework or static library wherever it was unpacked under ROOT/mvk."""
     mvk_root = ROOT / "mvk"
-    # Look for MoltenVK.framework
     for fw in mvk_root.rglob("MoltenVK.framework"):
-        # Select iOS slice if inside an xcframework
         if "ios" in str(fw).lower() or not any("macos" in part.lower() for part in fw.parts):
             return ["-F" + str(fw.parent), "-framework", "MoltenVK"]
-    # Look for libMoltenVK.a
     for lib in mvk_root.rglob("libMoltenVK.a"):
         if "ios" in str(lib).lower() or not any("macos" in part.lower() for part in lib.parts):
             return [str(lib)]
@@ -41,13 +37,25 @@ def link(objs, extra):
         sdl_dir = ROOT / "ios-deps/sdl3"
         mvk_flags = find_mvk_flags()
 
+        # Mach-O linker flags:
+        # -pagezero_size,0x10000 allows low-address execution & 32-bit pointer targets
+        # -image_base,0x20000000 links in the designated 32-bit address space
+        # -no_compact_unwind disables compact unwind warnings/blocks on custom assembly
+        # -bind_at_load resolves pointer relocations immediately at load time
+        ios_link_flags = [
+            "-Wl,-no_compact_unwind",
+            "-Wl,-pagezero_size,0x10000",
+            "-Wl,-image_base,0x20000000",
+            "-Wl,-bind_at_load",
+            "-Wl,-no_pie"
+        ]
+
         cmd = [
             "clang++",
             "-target", "arm64-apple-ios15.0",
             "-isysroot", sdk_path,
-            "-Wl,-pie",
             "-o", str(EXE)
-        ] + extra + objs + [
+        ] + ios_link_flags + extra + objs + [
             f"-L{sdl_dir / 'lib'}", "-lSDL3"
         ] + mvk_flags + [
             "-framework", "Metal",
@@ -74,7 +82,6 @@ def main():
     objs = [str(o) for o in sorted(OBJ.glob("*.o")) + sorted(DATA.glob("*.o"))]
     r = link(objs, [])
 
-    # Collect undefined symbols reported by ld64
     need = set(re.findall(r"undefined reference to `(\w+)'", r.stderr))
     for m in re.finditer(r'"_(\w+)", referenced from:', r.stderr):
         need.add(m.group(1))
