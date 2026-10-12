@@ -29,7 +29,7 @@ IOS_SDK = get_ios_sdk() if IOS else ""
 if WIN:
     CLANG_TARGET = ["--target=x86_64-w64-mingw32"]
 elif IOS:
-    CLANG_TARGET = ["--target=arm64-apple-ios15.0", "-isysroot", IOS_SDK]
+    CLANG_TARGET = ["--target=arm64-apple-ios15.0.0", "-miphoneos-version-min=15.0", "-isysroot", IOS_SDK]
 else:
     CLANG_TARGET = []
 
